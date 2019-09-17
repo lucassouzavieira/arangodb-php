@@ -1,3 +1,130 @@
+Release notes for the ArangoDB-PHP driver 3.5.x
+===============================================
+
+Made `DocumentHandler::save()` an alias for `DocumentHandler::insert()`, to more closely
+match the function names used in arangosh/arangod.
+
+Added support for streaming transactions (i.e. transactions that can be composed of multiple
+operations on the client side piece-by-piece without specifying the full transaction operations 
+in advance).
+
+Streaming transactions currently support the following operations:
+
+- fetch documents by id, i.e. `DocumentHandler::getById()`
+- update documents by id, i.e. `DocumentHandler::updateById()` 
+- replace documents by id, i.e. `DocumentHandler::replaceById()` 
+- remove documents by id, i.e. `DocumentHandler::removeById()`
+- insert documents, i.e. `DocumentHandler::insert()`
+- counting documents in a collection, i.e. `CollectionHandler::count()`
+- truncating a collection, i.e. `CollectionHandler::truncate()`
+- running AQL queries, i.e. `Statement::execute()`
+
+Other driver operations than the above are currently not supported within streaming transactions.
+
+Streaming transactions are provided by a new class `StreamingTransaction` and a new handler
+`StreamingTransactionHandler`.
+        
+    $document           = new DocumentHandler($connection);
+    $transactionHandler = new StreamingTransactionHandler($connection);
+
+    // creates a transaction object
+    $trx = new StreamingTransaction($connection, [
+         TransactionBase::ENTRY_COLLECTIONS => [
+             TransactionBase::ENTRY_WRITE => [ 'testCollection' ]
+         ]
+    ]);
+
+    // starts the transaction
+    $trx = $transactionHandler->create($trx);
+       
+    // get a StreamingTransactionCollection object. this is used to execute operations
+    // in a transaction context
+    $trxCollection = $trx->getCollection('testCollection');
+        
+    // pass the StreamingTransactionCollection into the document operations instead of
+    // a regular Collection object - this will make the operations execute in the context
+    // of the currently running transaction
+    $result = $documentHandler->insert($trxCollection, [ '_key' => 'test1', 'value' => 'test1' ]);
+    
+    $result = $documentHandler->insert($trxCollection, [ '_key' => 'test2', 'value' => 'test2' ]);
+
+    // commits the transaction
+    $transactionHandler->commit($trx);
+
+Caveat: streaming transactions will normally stay open on the server side until they are explicitly 
+aborted or committed by the client application, or until they time out automatically on the server.
+Therefore by default the PHP driver will automatically keep track of all begun streaming transactions,
+via an instance variable in the `StreamingTransactionHandler`.
+
+Streaming transactions are automatically aborted on shutdown via a shutdown function, and all
+transactions started via `StreamingTransactionHandler` instances that were neither committed nor 
+aborted by the user will be aborted. 
+In order to take over the management of a transaction from the `StreamingTransactionHandler`, it is
+possible to call the handler's `stealTransaction()` method with the transaction's id. This will
+make the handler "forget" about auto-aborting this particular transaction.
+
+
+Deprecated several methods in `CollectionHandler`, because they are deprecated in the arangod
+server as well:
+
+- CollectionHandler::fulltext()
+- CollectionHandler::updateByExample()
+- CollectionHandler::replaceByExample()
+- CollectionHandler::range()
+- CollectionHandler::near()
+- CollectionHandler::within()
+
+
+Added method `CollectionHandler::getShards()` to retrieve the list of available shards of a collection.
+
+Added method `CollectionHandler::getResponsibleShard()` to retrieve the shard id of the shard
+responsible for storing a particular document.
+
+
+All index-specific index-creation methods in `CollectionHandler` are now deprecated in favor of
+the much more general method `CollectionHandler::createIndex()`. This new methods replaces the
+following deprecated methods:
+
+- CollectionHandler::createHashIndex()
+- CollectionHandler::createFulltextIndex()
+- CollectionHandler::createSkipListIndex()
+- CollectionHandler::createPersistentIndex()
+- CollectionHandler::createTtlIndex()
+- CollectionHandler::createGeoIndex()
+- CollectionHandler::index()
+
+`CollectionHandler::createIndex()` now also supports named indexes and background indexing via
+setting the respective options on index creation, e.g.
+
+    $collectionHandler->createIndex($collection, [
+        'type'         => 'persistent',
+        'name'         => 'my-index',
+        'fields'       => ['a', 'b'],
+        'unique'       => true,
+        'sparse'       => false,
+        'inBackground' => true
+    ]);
+
+The now deprecated specialized index methods will be removed in a future release of the driver
+in favor of the generic `createIndex` method.
+
+
+The `CollectionHandler` class got a new method `createTtlIndex` for creating time-to-live (TTL)
+indexes on the server.
+
+All specialized methods for index creation also got an extra optional attribute `$inBackground` that 
+enables background index creation.
+
+Added driver support for the following attributes on collection level:
+
+- distributeShardsLike
+- smartJoinAttribute (only effective in ArangoDB enterprise edition)
+- minReplicationFactor
+
+Removed unused `$_action` member in class `AqlUserFunction`, also 
+removed its `__toString()` method.
+
+
 Release notes for the ArangoDB-PHP driver 3.4.x
 ===============================================
 

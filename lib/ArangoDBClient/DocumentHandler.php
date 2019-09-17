@@ -170,19 +170,21 @@ class DocumentHandler extends Handler
      */
     protected function getDocument($url, $collection, $documentId, array $options = [])
     {
-        $collection = $this->makeCollection($collection);
+        $headers        = [];
+        $this->addTransactionHeader($headers, $collection);
+
+        $collection     = $this->makeCollection($collection);
 
         $url            = UrlHelper::buildUrl($url, [$collection, $documentId]);
-        $headerElements = [];
         if (array_key_exists('ifMatch', $options) && array_key_exists('revision', $options)) {
             if ($options['ifMatch'] === true) {
-                $headerElements['If-Match'] = '"' . $options['revision'] . '"';
+                $headers['If-Match'] = '"' . $options['revision'] . '"';
             } else {
-                $headerElements['If-None-Match'] = '"' . $options['revision'] . '"';
+                $headers['If-None-Match'] = '"' . $options['revision'] . '"';
             }
         }
 
-        $response = $this->getConnection()->get($url, $headerElements);
+        $response = $this->getConnection()->get($url, $headers);
 
         if ($response->getHttpCode() === 304) {
             throw new ClientException('Document has not changed.');
@@ -232,19 +234,21 @@ class DocumentHandler extends Handler
      */
     protected function head($url, $collection, $documentId, $revision = null, $ifMatch = null)
     {
-        $collection = $this->makeCollection($collection);
+        $headers        = [];
+        $this->addTransactionHeader($headers, $collection);
+
+        $collection     = $this->makeCollection($collection);
 
         $url            = UrlHelper::buildUrl($url, [$collection, $documentId]);
-        $headerElements = [];
         if ($revision !== null && $ifMatch !== null) {
             if ($ifMatch) {
-                $headerElements['If-Match'] = '"' . $revision . '"';
+                $headers['If-Match'] = '"' . $revision . '"';
             } else {
-                $headerElements['If-None-Match'] = '"' . $revision . '"';
+                $headers['If-None-Match'] = '"' . $revision . '"';
             }
         }
-
-        $response            = $this->getConnection()->head($url, $headerElements);
+        
+        $response            = $this->getConnection()->head($url, $headers);
         $headers             = $response->getHeaders();
         $headers['httpCode'] = $response->getHttpCode();
 
@@ -313,7 +317,7 @@ class DocumentHandler extends Handler
 
 
     /**
-     * save a document to a collection
+     * insert a document into a collection
      *
      * This will add the document to the collection and return the document's id
      *
@@ -335,8 +339,11 @@ class DocumentHandler extends Handler
      * @return mixed - id of document created
      * @since 1.0
      */
-    public function save($collection, $document, array $options = [])
+    public function insert($collection, $document, array $options = [])
     {
+        $headers = [];
+        $this->addTransactionHeader($headers, $collection);
+
         $collection     = $this->makeCollection($collection);
         $_documentClass = $this->_documentClass;
 
@@ -344,14 +351,16 @@ class DocumentHandler extends Handler
             $options, [
                 'waitForSync'      => null,
                 'silent'           => false,
-                'createCollection' => $this->getConnection()->getOption(ConnectionOptions::OPTION_CREATE),
                 'overwrite'        => (bool) @$options[self::OPTION_OVERWRITE],
                 'returnOld'        => (bool) @$options[self::OPTION_RETURN_OLD],
                 'returnNew'        => (bool) @$options[self::OPTION_RETURN_NEW],
             ]
         );
 
-        $this->createCollectionIfOptions($collection, $params);
+        if ((isset($options['createCollection']) && $options['createCollection']) ||
+            $this->getConnection()->getOption(ConnectionOptions::OPTION_CREATE)) {
+            $this->lazyCreateCollection($collection, $params);
+        }
 
         $url = UrlHelper::appendParamsUrl(Urls::URL_DOCUMENT . '/' . $collection, $params);
 
@@ -361,7 +370,7 @@ class DocumentHandler extends Handler
             $data = $document->getAllForInsertUpdate();
         }
 
-        $response = $this->getConnection()->post($url, $this->json_encode_wrapper($data));
+        $response = $this->getConnection()->post($url, $this->json_encode_wrapper($data), $headers);
         $json     = $response->getJson();
 
         // This makes sure that if we're in batch mode, it will not go further and choke on the checks below.
@@ -387,6 +396,7 @@ class DocumentHandler extends Handler
 
         $id = UrlHelper::getDocumentIdFromLocation($location);
 
+        $document->setInternalKey($json[$_documentClass::ENTRY_KEY]);
         $document->setInternalId($json[$_documentClass::ENTRY_ID]);
         $document->setRevision($json[$_documentClass::ENTRY_REV]);
 
@@ -402,11 +412,11 @@ class DocumentHandler extends Handler
     /**
      * Insert a document into a collection
      * 
-     * This is an alias for save().
+     * This is an alias for insert().
      */
-    public function insert($collection, $document, array $options = []) 
+    public function save($collection, $document, array $options = []) 
     {
-        return $this->save($collection, $document, $options);
+        return $this->insert($collection, $document, $options);
     }
 
     /**
@@ -493,6 +503,9 @@ class DocumentHandler extends Handler
      */
     protected function patch($url, $collection, $documentId, Document $document, array $options = [])
     {
+        $headers = [];
+        $this->addTransactionHeader($headers, $collection);
+
         $collection     = $this->makeCollection($collection);
         $_documentClass = $this->_documentClass;
 
@@ -509,7 +522,6 @@ class DocumentHandler extends Handler
         );
 
 
-        $headers = [];
         if (isset($params[ConnectionOptions::OPTION_UPDATE_POLICY]) &&
             $params[ConnectionOptions::OPTION_UPDATE_POLICY] === UpdatePolicy::ERROR
         ) {
@@ -539,9 +551,9 @@ class DocumentHandler extends Handler
     /**
      * Replace an existing document in a collection, identified by the document itself
      *
-     * This will update the document on the server
+     * This will replace the document on the server
      *
-     * This will throw if the document cannot be updated
+     * This will throw if the document cannot be replaced
      *
      * If policy is set to error (locally or globally through the ConnectionOptions)
      * and the passed document has a _rev value set, the database will check
@@ -549,10 +561,10 @@ class DocumentHandler extends Handler
      *
      * @throws Exception
      *
-     * @param Document $document - document to be updated
+     * @param Document $document - document to be replaced
      * @param array    $options  - optional, array of options
      *                           <p>Options are :
-     *                           <li>'policy' - update policy to be used in case of conflict ('error', 'last' or NULL [use default])</li>
+     *                           <li>'policy' - replace policy to be used in case of conflict ('error', 'last' or NULL [use default])</li>
      *                           <li>'waitForSync' - can be used to force synchronisation of the document update operation to disk even in case that the waitForSync flag had been disabled for the entire collection</li>
      *                           </p>
      *
@@ -560,9 +572,7 @@ class DocumentHandler extends Handler
      */
     public function replace(Document $document, array $options = [])
     {
-        $documentId = $this->getDocumentId($document);
-
-        return $this->replaceById($document, $documentId, $document, $options);
+        return $this->replaceById($document, $this->getDocumentId($document), $document, $options);
     }
 
 
@@ -618,6 +628,9 @@ class DocumentHandler extends Handler
      */
     protected function put($url, $collection, $documentId, Document $document, array $options = [])
     {
+        $headers = [];
+        $this->addTransactionHeader($headers, $collection);
+
         $collection     = $this->makeCollection($collection);
         $_documentClass = $this->_documentClass;
 
@@ -632,7 +645,6 @@ class DocumentHandler extends Handler
             ]
         );
 
-        $headers = [];
         if (isset($params[ConnectionOptions::OPTION_REPLACE_POLICY]) &&
             $params[ConnectionOptions::OPTION_REPLACE_POLICY] === UpdatePolicy::ERROR
         ) {
@@ -641,7 +653,7 @@ class DocumentHandler extends Handler
                 $headers['if-match']  = '"' . $options['revision'] . '"';
             }
         }
-
+        
         $data = $document->getAllForInsertUpdate();
 
         $url    = UrlHelper::buildUrl($url, [$collection, $documentId]);
@@ -674,11 +686,7 @@ class DocumentHandler extends Handler
      */
     public function remove(Document $document, array $options = [])
     {
-        $documentId = $this->getDocumentId($document);
-
-        $revision = $this->getRevision($document);
-
-        return $this->removeById($document, $documentId, $revision, $options);
+        return $this->removeById($document, $this->getDocumentId($document), $this->getRevision($document), $options);
     }
 
 
@@ -725,6 +733,9 @@ class DocumentHandler extends Handler
      */
     protected function erase($url, $collection, $documentId, $revision = null, array $options = [])
     {
+        $headers = [];
+        $this->addTransactionHeader($headers, $collection);
+
         $collection = $this->makeCollection($collection);
 
         $params = $this->includeOptionsInParams(
@@ -737,7 +748,6 @@ class DocumentHandler extends Handler
             ]
         );
 
-        $headers = [];
         if (isset($params[ConnectionOptions::OPTION_DELETE_POLICY]) &&
             $params[ConnectionOptions::OPTION_DELETE_POLICY] === UpdatePolicy::ERROR
         ) {
@@ -808,28 +818,16 @@ class DocumentHandler extends Handler
 
 
     /**
-     * @param       $collection   mixed collection name or id
+     * @param mixed $collection   collection name or id
      * @param array $options      - optional, array of options
      *                            <p>Options are :
-     *                            <li>'createCollection' - true to create the collection if it does not exist</li>
      *                            <li>'createCollectionType' - "document" or 2 for document collection</li>
      *                            <li>                         "edge" or 3 for edge collection</li>
      *                            <li>'waitForSync'       - if set to true, then all removal operations will instantly be synchronised to disk / If this is not specified, then the collection's default sync behavior will be applied.</li>
      *                            </p>
      */
-    protected function createCollectionIfOptions($collection, $options)
+    protected function lazyCreateCollection($collection, $options)
     {
-
-        if (!array_key_exists(CollectionHandler::OPTION_CREATE_COLLECTION, $options)) {
-            return;
-        }
-
-        $value = (bool) $options[CollectionHandler::OPTION_CREATE_COLLECTION];
-
-        if (!$value) {
-            return;
-        }
-
         $collectionHandler = new CollectionHandler($this->getConnection());
 
         $params = [];

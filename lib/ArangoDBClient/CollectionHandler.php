@@ -58,6 +58,11 @@ class CollectionHandler extends Handler
     const OPTION_KEYS = 'keys';
 
     /**
+     * stream parameter
+     */
+    const OPTION_STREAM = 'stream';
+
+    /**
      * left parameter
      */
     const OPTION_LEFT = 'left';
@@ -161,6 +166,21 @@ class CollectionHandler extends Handler
      * persistent index option
      */
     const OPTION_PERSISTENT_INDEX = 'persistent';
+    
+    /**
+     * ttl index option
+     */
+    const OPTION_TTL_INDEX = 'ttl';
+    
+    /**
+     * expireAfter option
+     */
+    const OPTION_EXPIRE_AFTER = 'expireAfter';
+    
+    /**
+     * inBackground option
+     */
+    const OPTION_IN_BACKGROUND = 'inBackground';
 
     /**
      * sparse index option
@@ -186,6 +206,16 @@ class CollectionHandler extends Handler
      * revision option
      */
     const OPTION_REVISION = 'revision';
+    
+    /**
+     * responsible shard option
+     */
+    const OPTION_RESPONSIBLE_SHARD = 'responsibleShard';
+    
+    /**
+     * shards option
+     */
+    const OPTION_SHARDS = 'shards';
 
     /**
      * properties option
@@ -214,16 +244,19 @@ class CollectionHandler extends Handler
      * @param mixed $collection - collection object to be created on the server or a string with the name
      * @param array $options    - an array of options.
      *                          <p>Options are :<br>
-     *                          <li>'type'              - 2 -> normal collection, 3 -> edge-collection</li>
-     *                          <li>'waitForSync'       - if set to true, then all removal operations will instantly be synchronised to disk / If this is not specified, then the collection's default sync behavior will be applied.</li>
-     *                          <li>'journalSize'       - journalSize value.</li>
-     *                          <li>'isSystem'          - false->user collection(default), true->system collection .</li>
-     *                          <li>'isVolatile'        - false->persistent collection(default), true->volatile (in-memory) collection .</li>
-     *                          <li>'keyOptions'        - key options to use.</li>
-     *                          <li>'numberOfShards'    - number of shards for the collection.</li>
-     *                          <li>'shardKeys'         - array of shard key attributes.</li>
-     *                          <li>'replicationFactor' - number of replicas to keep (default: 1).</li>
-     *                          <li>'shardingStrategy'  - sharding strategy to use in cluster.</li>
+     *                          <li>'type'                 - 2 -> normal collection, 3 -> edge-collection</li>
+     *                          <li>'waitForSync'          - if set to true, then all removal operations will instantly be synchronised to disk / If this is not specified, then the collection's default sync behavior will be applied.</li>
+     *                          <li>'journalSize'          - journalSize value.</li>
+     *                          <li>'isSystem'             - false->user collection(default), true->system collection .</li>
+     *                          <li>'isVolatile'           - false->persistent collection(default), true->volatile (in-memory) collection .</li>
+     *                          <li>'keyOptions'           - key options to use.</li>
+     *                          <li>'distributeShardsLike' - name of prototype collection for identical sharding.</li>
+     *                          <li>'numberOfShards'       - number of shards for the collection.</li>
+     *                          <li>'replicationFactor'    - number of replicas to keep (default: 1).</li>
+     *                          <li>'minReplicationFactor' - minimum number of replicas to be successful when writing (default: 1).</li>
+     *                          <li>'shardKeys'            - array of shard key attributes.</li>
+     *                          <li>'shardingStrategy'     - sharding strategy to use in cluster.</li>
+     *                          <li>'smartJoinAttribute'   - attribute name for smart joins (if not shard key).</li>
      *                          </p>
      *
      * @return mixed - id of collection created
@@ -266,6 +299,10 @@ class CollectionHandler extends Handler
         ];
 
         // set extra cluster attributes
+        if ($collection->getDistributeShardsLike() !== null) {
+            $params[Collection::ENTRY_DISTRIBUTE_SHARDS_LIKE] = $collection->getDistributeShardsLike();
+        }
+
         if ($collection->getNumberOfShards() !== null) {
             $params[Collection::ENTRY_NUMBER_OF_SHARDS] = $collection->getNumberOfShards();
         }
@@ -274,12 +311,20 @@ class CollectionHandler extends Handler
             $params[Collection::ENTRY_REPLICATION_FACTOR] = $collection->getReplicationFactor();
         }
         
+        if ($collection->getMinReplicationFactor() !== null) {
+            $params[Collection::ENTRY_MIN_REPLICATION_FACTOR] = $collection->getMinReplicationFactor();
+        }
+        
         if ($collection->getShardingStrategy() !== null) {
             $params[Collection::ENTRY_SHARDING_STRATEGY] = $collection->getShardingStrategy();
         }
 
         if (is_array($collection->getShardKeys())) {
             $params[Collection::ENTRY_SHARD_KEYS] = $collection->getShardKeys();
+        }
+        
+        if ($collection->getSmartJoinAttribute() !== null) {
+            $params[Collection::ENTRY_SMART_JOIN_ATTRIBUTE] = $collection->getSmartJoinAttribute();
         }
 
         $response = $this->getConnection()->post(Urls::URL_COLLECTION, $this->json_encode_wrapper($params));
@@ -363,9 +408,12 @@ class CollectionHandler extends Handler
      */
     public function count($collection)
     {
+        $headers    = [];
+        $this->addTransactionHeader($headers, $collection);
+
         $collection = $this->makeCollection($collection);
         $url        = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collection, self::OPTION_COUNT]);
-        $response   = $this->getConnection()->get($url);
+        $response   = $this->getConnection()->get($url, $headers);
 
         $data  = $response->getJson();
         $count = $data[self::OPTION_COUNT];
@@ -452,7 +500,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed   $collectionId         - collection id as a string or number
+     * @param mixed   $collection           - collection as string or object
      * @param boolean $withRevisions        - optional boolean whether or not to include document revision ids
      *                                      in the checksum calculation.
      * @param boolean $withData             - optional boolean whether or not to include document body data in the
@@ -460,10 +508,9 @@ class CollectionHandler extends Handler
      *
      * @return array - array containing keys "checksum" and "revision"
      */
-    public function getChecksum($collectionId, $withRevisions = false, $withData = false)
+    public function getChecksum($collection, $withRevisions = false, $withData = false)
     {
-
-        $url      = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionId, self::OPTION_CHECKSUM]);
+        $url      = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$this->makeCollection($collection), self::OPTION_CHECKSUM]);
         $url      = UrlHelper::appendParamsUrl($url, ['withRevisions' => $withRevisions, 'withData' => $withData]);
         $response = $this->getConnection()->get($url);
 
@@ -478,14 +525,13 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId - collection id as a string or number
+     * @param mixed $collection - collection as string or object
      *
      * @return array - containing a key revision
      */
-    public function getRevision($collectionId)
+    public function getRevision($collection)
     {
-
-        $url      = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionId, self::OPTION_REVISION]);
+        $url      = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$this->makeCollection($collection), self::OPTION_REVISION]);
         $response = $this->getConnection()->get($url);
 
         return $response->getJson();
@@ -496,22 +542,16 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed  $collection - collection id as string or number or collection object
+     * @param mixed  $collection - collection as string or object
      * @param string $name       - new name for collection
      *
      * @return bool - always true, will throw if there is an error
      */
     public function rename($collection, $name)
     {
-        $collectionId = $this->getCollectionId($collection);
-
-        if ($this->isValidCollectionId($collectionId)) {
-            throw new ClientException('Cannot alter a collection without a collection id');
-        }
-
         $params = [Collection::ENTRY_NAME => $name];
         $this->getConnection()->put(
-            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionId, self::OPTION_RENAME]),
+            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$this->makeCollection($collection), self::OPTION_RENAME]),
             $this->json_encode_wrapper($params)
         );
 
@@ -525,20 +565,14 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collection - collection id as string or number or collection object
+     * @param mixed $collection - collection as string or object
      *
      * @return HttpResponse - HTTP response object
      */
     public function load($collection)
     {
-        $collectionId = $this->getCollectionId($collection);
-
-        if ($this->isValidCollectionId($collectionId)) {
-            throw new ClientException('Cannot alter a collection without a collection id');
-        }
-
         $result = $this->getConnection()->put(
-            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionId, self::OPTION_LOAD]),
+            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$this->makeCollection($collection), self::OPTION_LOAD]),
             ''
         );
 
@@ -552,20 +586,14 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collection - collection id as string or number or collection object
+     * @param mixed $collection - collection as string or object
      *
      * @return HttpResponse - HTTP response object
      */
     public function unload($collection)
     {
-        $collectionId = $this->getCollectionId($collection);
-
-        if ($this->isValidCollectionId($collectionId)) {
-            throw new ClientException('Cannot alter a collection without a collection id');
-        }
-
         $result = $this->getConnection()->put(
-            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionId, self::OPTION_UNLOAD]),
+            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$this->makeCollection($collection), self::OPTION_UNLOAD]),
             ''
         );
 
@@ -586,15 +614,19 @@ class CollectionHandler extends Handler
      */
     public function truncate($collection)
     {
-        $collectionId = $this->getCollectionId($collection);
-
-        if ($this->isValidCollectionId($collectionId)) {
-            throw new ClientException('Cannot alter a collection without a collection id');
+        $headers      = [];
+        $bodyParams   = [];
+        $this->addTransactionHeader($headers, $collection);
+        if ($collection instanceof StreamingTransactionCollection) {
+            $bodyParams['transactionId'] = $collection->getTrxId();
         }
 
+        $collection   = $this->makeCollection($collection);
+
         $this->getConnection()->put(
-            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionId, self::OPTION_TRUNCATE]),
-            ''
+            UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collection, self::OPTION_TRUNCATE]),
+            $this->json_encode_wrapper($bodyParams),
+            $headers
         );
 
         return true;
@@ -613,18 +645,12 @@ class CollectionHandler extends Handler
      */
     public function drop($collection, array $options = [])
     {
-        $collectionName = $this->getCollectionName($collection);
-
-        if ($this->isValidCollectionId($collectionName)) {
-            throw new ClientException('Cannot alter a collection without a collection id');
-        }
-
         $appendix = '';
         if (is_array($options) && isset($options['isSystem'])) {
             $appendix = '?isSystem=' . UrlHelper::getBoolString($options['isSystem']);
         }
 
-        $this->getConnection()->delete(UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collectionName]) . $appendix);
+        $this->getConnection()->delete(UrlHelper::buildUrl(Urls::URL_COLLECTION, [$this->makeCollection($collection)]) . $appendix);
 
         return true;
     }
@@ -729,7 +755,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId   - collection id as string or number
+     * @param mixed $collectionId   - collection as string or object
      * @param mixed $importFileName - The filename that holds the import data.
      * @param array $options        - optional - an array of options.
      *                              <p>Options are :<br>
@@ -747,11 +773,7 @@ class CollectionHandler extends Handler
      *
      * @return array - returns an array with the server's response data from the import command
      */
-    public function importFromFile(
-        $collectionId,
-        $importFileName,
-        array $options = []
-    )
+    public function importFromFile($collection, $importFileName, array $options = [])
     {
 
         $contents = file_get_contents($importFileName);
@@ -759,7 +781,7 @@ class CollectionHandler extends Handler
             throw new ClientException('Input file "' . $importFileName . '" could not be found.');
         }
 
-        return $this->import($collectionId, $contents, $options);
+        return $this->import($collection, $contents, $options);
     }
 
 
@@ -769,7 +791,7 @@ class CollectionHandler extends Handler
      * This will throw on all errors except insertion errors
      *
      *
-     * @param              $collection   mixed $collection - collection id as string or number
+     * @param              $collection   mixed $collection - collection as string or object
      * @param string|array $importData   - The data to import. This can be a string holding the data according to the type of import, or an array of documents
      * @param array        $options      - optional - an array of options.
      *                                   <p>Options are :<br>
@@ -795,11 +817,7 @@ class CollectionHandler extends Handler
      * @throws \ArangoDBClient\Exception
      * @throws \ArangoDBClient\ClientException
      */
-    public function import(
-        $collection,
-        $importData,
-        array $options = []
-    )
+    public function import($collection, $importData, array $options = [])
     {
         $collection = $this->makeCollection($collection);
 
@@ -814,7 +832,10 @@ class CollectionHandler extends Handler
             $options['type'] = 'documents';
         }
 
-        $this->createCollectionIfOptions($collection, $options);
+        if ((isset($options['createCollection']) && $options['createCollection']) ||
+            $this->getConnection()->getOption(ConnectionOptions::OPTION_CREATE)) {
+            $this->lazyCreateCollection($collection, $options);
+        }
 
         $params = array_merge(
             [self::OPTION_COLLECTION => $collection],
@@ -843,19 +864,23 @@ class CollectionHandler extends Handler
     /**
      * Create a hash index
      *
-     * @param string  $collectionId - the collection id
+     * @param mixed   $collection   - the collection as name or object
      * @param array   $fields       - an array of fields
-     * @param boolean $unique       - whether the values in the index should be unique or not
-     * @param boolean $sparse       - whether the index should be sparse
+     * @param bool    $unique       - whether the values in the index should be unique or not
+     * @param bool    $sparse       - whether the index should be sparse
+     * @param bool    $inBackground - true if index shall be created in background
      *
-     * @link https://docs.arangodb.com/HTTP/Indexes/Hash.html
+     * @deprecated use CollectionHandler::createIndex instead
      *
      * @return array - server response of the created index
      * @throws \ArangoDBClient\Exception
      */
-    public function createHashIndex($collectionId, array $fields, $unique = null, $sparse = null)
+    public function createHashIndex($collection, array $fields, $unique = null, $sparse = null, $inBackground = false)
     {
-        $indexOptions = [];
+        $indexOptions = [
+            self::OPTION_TYPE   => 'hash',
+            self::OPTION_FIELDS => $fields
+        ];
 
         if ($unique) {
             $indexOptions[self::OPTION_UNIQUE] = (bool) $unique;
@@ -863,49 +888,63 @@ class CollectionHandler extends Handler
         if ($sparse) {
             $indexOptions[self::OPTION_SPARSE] = (bool) $sparse;
         }
+        if ($inBackground) {
+            $indexOptions[self::OPTION_IN_BACKGROUND] = (bool) $inBackground;
+        }
 
-        return $this->index($collectionId, self::OPTION_HASH_INDEX, $fields, null, $indexOptions);
+        return $this->createIndex($collection, $indexOptions);
     }
 
     /**
      * Create a fulltext index
      *
-     * @param string $collectionId - the collection id
+     * @param mixed  $collection   - collection as string or object
      * @param array  $fields       - an array of fields
      * @param int    $minLength    - the minimum length of words to index
+     * @param bool   $inBackground - true if index shall be created in background
      *
-     * @link https://docs.arangodb.com/HTTP/Indexes/Fulltext.html
+     * @deprecated use CollectionHandler::createIndex instead
      *
      * @return array - server response of the created index
      * @throws \ArangoDBClient\Exception
      */
-    public function createFulltextIndex($collectionId, array $fields, $minLength = null)
+    public function createFulltextIndex($collection, array $fields, $minLength = null, $inBackground = false)
     {
-        $indexOptions = [];
+        $indexOptions = [
+            self::OPTION_TYPE   => 'fulltext',
+            self::OPTION_FIELDS => $fields
+        ];
 
         if ($minLength) {
             $indexOptions[self::OPTION_MIN_LENGTH] = $minLength;
         }
+        if ($inBackground) {
+            $indexOptions[self::OPTION_IN_BACKGROUND] = (bool) $inBackground;
+        }
 
-        return $this->index($collectionId, self::OPTION_FULLTEXT_INDEX, $fields, null, $indexOptions);
+        return $this->createIndex($collection, $indexOptions);
     }
 
     /**
      * Create a skip-list index
      *
-     * @param string $collectionId - the collection id
+     * @param mixed  $collection   - collection as string or object
      * @param array  $fields       - an array of fields
      * @param bool   $unique       - whether the index is unique or not
      * @param bool   $sparse       - whether the index should be sparse
+     * @param bool   $inBackground - true if index shall be created in background
      *
-     * @link https://docs.arangodb.com/HTTP/Indexes/Skiplist.html
+     * @deprecated use CollectionHandler::createIndex instead
      *
      * @return array - server response of the created index
      * @throws \ArangoDBClient\Exception
      */
-    public function createSkipListIndex($collectionId, array $fields, $unique = null, $sparse = null)
+    public function createSkipListIndex($collection, array $fields, $unique = null, $sparse = null, $inBackground = false)
     {
-        $indexOptions = [];
+        $indexOptions = [
+            self::OPTION_TYPE   => 'skiplist',
+            self::OPTION_FIELDS => $fields
+        ];
 
         if ($unique) {
             $indexOptions[self::OPTION_UNIQUE] = (bool) $unique;
@@ -913,26 +952,33 @@ class CollectionHandler extends Handler
         if ($sparse) {
             $indexOptions[self::OPTION_SPARSE] = (bool) $sparse;
         }
+        if ($inBackground) {
+            $indexOptions[self::OPTION_IN_BACKGROUND] = (bool) $inBackground;
+        }
 
-        return $this->index($collectionId, self::OPTION_SKIPLIST_INDEX, $fields, null, $indexOptions);
+        return $this->createIndex($collection, $indexOptions);
     }
 
     /**
      * Create a persistent index
      *
-     * @param string $collectionId - the collection id
+     * @param mixed  $collection   - collection as string or object
      * @param array  $fields       - an array of fields
      * @param bool   $unique       - whether the index is unique or not
      * @param bool   $sparse       - whether the index should be sparse
+     * @param bool   $inBackground - true if index shall be created in background
      *
-     * @link https://docs.arangodb.com/HTTP/Indexes/Persistent.html
+     * @deprecated use CollectionHandler::createIndex instead
      *
      * @return array - server response of the created index
      * @throws \ArangoDBClient\Exception
      */
-    public function createPersistentIndex($collectionId, array $fields, $unique = null, $sparse = null)
+    public function createPersistentIndex($collection, array $fields, $unique = null, $sparse = null, $inBackground = false)
     {
-        $indexOptions = [];
+        $indexOptions = [
+            self::OPTION_TYPE   => 'persistent',
+            self::OPTION_FIELDS => $fields
+        ];
 
         if ($unique) {
             $indexOptions[self::OPTION_UNIQUE] = (bool) $unique;
@@ -940,31 +986,69 @@ class CollectionHandler extends Handler
         if ($sparse) {
             $indexOptions[self::OPTION_SPARSE] = (bool) $sparse;
         }
+        if ($inBackground) {
+            $indexOptions[self::OPTION_IN_BACKGROUND] = (bool) $inBackground;
+        }
 
-        return $this->index($collectionId, self::OPTION_PERSISTENT_INDEX, $fields, null, $indexOptions);
+        return $this->createIndex($collection, $indexOptions);
+    }
+    
+    /**
+     * Create a TTL index
+     *
+     * @param mixed  $collection   - collection as string or object
+     * @param array  $fields       - an array of fields (only a single one allowed)
+     * @param number $expireAfter  - number of seconds after index value after which documents expire
+     * @param bool   $inBackground - true if index shall be created in background
+     *
+     * @deprecated use CollectionHandler::createIndex instead
+     *
+     * @return array - server response of the created index
+     * @throws \ArangoDBClient\Exception
+     */
+    public function createTtlIndex($collection, array $fields, $expireAfter, $inBackground = false)
+    {
+        $indexOptions = [
+            self::OPTION_TYPE         => 'ttl',
+            self::OPTION_FIELDS       => $fields,
+            self::OPTION_EXPIRE_AFTER => (double) $expireAfter
+        ];
+    
+        if ($inBackground) {
+            $indexOptions[self::OPTION_IN_BACKGROUND] = (bool) $inBackground;
+        }
+
+        return $this->createIndex($collection, $indexOptions);
     }
 
     /**
      * Create a geo index
      *
-     * @param string  $collectionId - the collection id
+     * @param mixed   $collection   - collection as string or object
      * @param array   $fields       - an array of fields
-     * @param boolean $geoJson      - whether to use geoJson or not
+     * @param bool    $geoJson      - whether to use geoJson or not
+     * @param bool    $inBackground - true if index shall be created in background
      *
-     * @link https://docs.arangodb.com/HTTP/Indexes/Geo.html
+     * @deprecated use CollectionHandler::createIndex instead
      *
      * @return array - server response of the created index
      * @throws \ArangoDBClient\Exception
      */
-    public function createGeoIndex($collectionId, array $fields, $geoJson = null)
+    public function createGeoIndex($collection, array $fields, $geoJson = null, $inBackground = false)
     {
-        $indexOptions = [];
+        $indexOptions = [
+            self::OPTION_TYPE   => 'geo',
+            self::OPTION_FIELDS => $fields,
+        ];
 
         if ($geoJson) {
             $indexOptions[self::OPTION_GEOJSON] = (bool) $geoJson;
         }
+        if ($inBackground) {
+            $indexOptions[self::OPTION_IN_BACKGROUND] = (bool) $inBackground;
+        }
 
-        return $this->index($collectionId, self::OPTION_GEO_INDEX, $fields, null, $indexOptions);
+        return $this->createIndex($collection, $indexOptions);
     }
 
     /**
@@ -976,18 +1060,19 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed  $collectionId - The id of the collection where the index is to be created
-     * @param string $type         - index type: hash, skiplist, geo, fulltext, or persistent
+     * @param mixed  $collection   - collection as string or object
+     * @param string $type         - index type: hash, skiplist, geo, ttl, fulltext, or persistent
      * @param array  $attributes   - an array of attributes that can be defined like array('a') or array('a', 'b.c')
      * @param bool   $unique       - true/false to create a unique index
      * @param array  $indexOptions - an associative array of options for the index like array('geoJson' => true, 'sparse' => false)
      *
+     * @deprecated use CollectionHandler::createIndex instead
+     *
      * @return array - server response of the created index
      */
-    public function index($collectionId, $type, array $attributes = [], $unique = false, array $indexOptions = [])
+    public function index($collection, $type, array $attributes = [], $unique = false, array $indexOptions = [])
     {
-
-        $urlParams  = [self::OPTION_COLLECTION => $collectionId];
+        $urlParams  = [self::OPTION_COLLECTION => $this->makeCollection($collection)];
         $bodyParams = [
             self::OPTION_TYPE   => $type,
             self::OPTION_FIELDS => $attributes,
@@ -1005,8 +1090,43 @@ class CollectionHandler extends Handler
         $httpCode = $response->getHttpCode();
         switch ($httpCode) {
             case 404:
-                throw new ClientException('Collection-identifier is unknown');
+                throw new ClientException('Collection is unknown');
+                break;
+            case 400:
+                throw new ClientException('cannot create unique index due to documents violating uniqueness');
+                break;
+        }
 
+        return $response->getJson();
+    }
+    
+    
+    /**
+     * Creates an index on a collection on the server
+     *
+     * This will create an index on the collection on the server and return its id
+     *
+     * This will throw if the index cannot be created
+     *
+     * @throws Exception
+     *
+     * @param mixed  $collection   - collection as string or object
+     * @param array  $indexOptions - an associative array of options for the index like array('type' => hash, 'fields' => ..., 'sparse' => false)
+     *
+     * @return array - server response of the created index
+     * @since 3.5
+     */
+    public function createIndex($collection, array $indexOptions)
+    {
+        $urlParams  = [self::OPTION_COLLECTION => $this->makeCollection($collection)];
+
+        $url      = UrlHelper::appendParamsUrl(Urls::URL_INDEX, $urlParams);
+        $response = $this->getConnection()->post($url, $this->json_encode_wrapper($indexOptions));
+
+        $httpCode = $response->getHttpCode();
+        switch ($httpCode) {
+            case 404:
+                throw new ClientException('Collection is unknown');
                 break;
             case 400:
                 throw new ClientException('cannot create unique index due to documents violating uniqueness');
@@ -1043,13 +1163,13 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId - collection id as a string or number
+     * @param mixed $collection - collection as string or object
      *
      * @return array $data - the indexes result-set from the server
      */
-    public function getIndexes($collectionId)
+    public function getIndexes($collection)
     {
-        $urlParams = [self::OPTION_COLLECTION => $collectionId];
+        $urlParams = [self::OPTION_COLLECTION => $this->makeCollection($collection)];
         $url       = UrlHelper::appendParamsUrl(Urls::URL_INDEX, $urlParams);
         $response  = $this->getConnection()->get($url);
 
@@ -1061,16 +1181,75 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
+     * @param mixed $collection - collection as string or object
      * @param mixed $indexHandle - index handle (collection name / index id)
      *
      * @return bool - always true, will throw if there is an error
      */
-    public function dropIndex($indexHandle)
+    public function dropIndex($collection, $indexHandle = null)
     {
-        $handle = explode('/', $indexHandle);
-        $this->getConnection()->delete(UrlHelper::buildUrl(Urls::URL_INDEX, [$handle[0], $handle[1]]));
+        if ($indexHandle === null) {
+            $handle = explode('/', $collection);
+        } else {
+            $handle = [ $this->makeCollection($collection), $indexHandle ];
+        }
+
+        if (count($handle) > 2) {
+          throw new ClientException('Invalid index handle');
+        }
+
+        $this->getConnection()->delete(UrlHelper::buildUrl(Urls::URL_INDEX, $handle));
 
         return true;
+    }
+    
+    
+    /**
+     * Get the responsible shard for a document
+     *
+     * @throws Exception
+     *
+     * @param mixed $collection - collection as string or object
+     * @param mixed $document   - document
+     *
+     * @return string - shard id
+     * @since 3.5
+     */
+    public function getResponsibleShard($collection, $document)
+    {
+        if (is_array($document)) {
+            $data = $document;
+        } else {
+            $data = $document->getAll(['_includeInternals' => true ]);
+        }
+
+        $collection = $this->makeCollection($collection);
+        $url        = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collection, self::OPTION_RESPONSIBLE_SHARD]);
+        $response = $this->getConnection()->put($url, $this->json_encode_wrapper($data));
+        $data     = $response->getJson();
+
+        return $data['shardId'];
+    }
+    
+    
+    /**
+     * Get the shards of a collection
+     *
+     * @throws Exception
+     *
+     * @param mixed $collection - collection as string or object
+     *
+     * @return array - array with shard ids
+     * @since 3.5
+     */
+    public function getShards($collection) 
+    {
+        $collection = $this->makeCollection($collection);
+        $url        = UrlHelper::buildUrl(Urls::URL_COLLECTION, [$collection, self::OPTION_SHARDS]);
+        $response = $this->getConnection()->get($url);
+        $data     = $response->getJson();
+
+        return $data['shards'];
     }
 
     /**
@@ -1078,20 +1257,19 @@ class CollectionHandler extends Handler
      *
      * This will throw if the document cannot be fetched from the server
      *
-     *
      * @throws Exception
      *
-     * @param mixed $collectionId - collection id as string or number
+     * @param mixed $collection - collection as string or object
      *
      * @return Document - the document fetched from the server
      * @since 1.2
      */
-    public function any($collectionId)
+    public function any($collection)
     {
         $_documentClass = $this->_documentClass;
 
         $data = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
         ];
 
         $response = $this->getConnection()->put(Urls::URL_ANY, $this->json_encode_wrapper($data));
@@ -1108,7 +1286,7 @@ class CollectionHandler extends Handler
     /**
      * Returns all documents of a collection
      *
-     * @param mixed $collectionId     - collection id as string or number
+     * @param mixed $collection       - collection as string or object
      * @param array $options          - optional array of options.
      *                                <p>Options are :<br>
      *                                <li>'_sanitize'         - True to remove _id and _rev attributes from result documents. Defaults to false.</li>
@@ -1129,10 +1307,10 @@ class CollectionHandler extends Handler
      * @throws \ArangoDBClient\Exception
      * @throws \ArangoDBClient\ClientException
      */
-    public function all($collectionId, array $options = [])
+    public function all($collection, array $options = [])
     {
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
         ];
 
         $body = $this->includeOptionsInBody(
@@ -1143,6 +1321,8 @@ class CollectionHandler extends Handler
                 self::OPTION_SKIP  => null,
             ]
         );
+        
+        $body[self::OPTION_STREAM] = true;
 
         $response = $this->getConnection()->put(Urls::URL_ALL, $this->json_encode_wrapper($body));
         
@@ -1196,7 +1376,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId      - collection id as string or number
+     * @param mixed $collection        - collection as string or object
      * @param mixed $document          - the example document as a Document object or an array
      * @param array $options           - optional, prior to v1.0.0 this was a boolean value for sanitize, since v1.0.0 it's an array of options.
      *                                 <p>Options are :<br>
@@ -1215,7 +1395,7 @@ class CollectionHandler extends Handler
      *
      * @return cursor - Returns a cursor containing the result
      */
-    public function byExample($collectionId, $document, array $options = [])
+    public function byExample($collection, $document, array $options = [])
     {
         $_documentClass = $this->_documentClass;
 
@@ -1228,7 +1408,7 @@ class CollectionHandler extends Handler
         }
 
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_EXAMPLE    => $document->getAllAsObject(['_ignoreHiddenAttributes' => true])
         ];
 
@@ -1265,7 +1445,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId      - collection id as string or number
+     * @param mixed $collection        - collection as string or object
      * @param mixed $document          - the example document as a Document object or an array
      * @param array $options           - optional, an array of options.
      *                                 <p>Options are :<br>
@@ -1282,7 +1462,7 @@ class CollectionHandler extends Handler
      * @return Document - the document fetched from the server
      * @since 1.2
      */
-    public function firstExample($collectionId, $document, array $options = [])
+    public function firstExample($collection, $document, array $options = [])
     {
         $_documentClass = $this->_documentClass;
 
@@ -1295,7 +1475,7 @@ class CollectionHandler extends Handler
         }
 
         $data = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_EXAMPLE    => $document->getAll(['_ignoreHiddenAttributes' => true])
         ];
 
@@ -1341,12 +1521,14 @@ class CollectionHandler extends Handler
      *                                 <li>'index'     - If given, the identifier of the fulltext-index to use.</li>
      *                                 </p>
      *
+     * @deprecated use AQL queries instead
+     *
      * @return cursor - Returns a cursor containing the result
      */
     public function fulltext($collection, $attribute, $query, array $options = [])
     {
         $body = [
-            self::OPTION_COLLECTION => $collection,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_ATTRIBUTE  => $attribute,
             self::OPTION_QUERY      => $query,
         ];
@@ -1383,7 +1565,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId - collection id as string or number
+     * @param mixed $collection   - collection as string or number
      * @param mixed $example      - the example document as a Document object or an array
      * @param mixed $newValue     - patch document or array which contains the attributes and values to be updated
      * @param mixed $options      - optional, array of options (see below) or the boolean value for $policy (for compatibility prior to version 1.1 of this method)
@@ -1393,10 +1575,12 @@ class CollectionHandler extends Handler
      *                            <li>'limit'       - can be used set a limit on how many documents to update at most. If limit is specified but is less than the number of documents in the collection, it is undefined which of the documents will be updated.</li>
      *                            </p>
      *
+     * @deprecated use AQL queries instead
+     *
      * @return bool - always true, will throw if there is an error
      * @since 1.2
      */
-    public function updateByExample($collectionId, $example, $newValue, array $options = [])
+    public function updateByExample($collection, $example, $newValue, array $options = [])
     {
         $_documentClass = $this->_documentClass;
 
@@ -1409,7 +1593,7 @@ class CollectionHandler extends Handler
         }
 
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_EXAMPLE    => $example->getAllAsObject(['_ignoreHiddenAttributes' => true]),
             self::OPTION_NEW_VALUE  => $newValue->getAllAsObject(['_ignoreHiddenAttributes' => true])
         ];
@@ -1447,7 +1631,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId - collection id as string or number
+     * @param mixed $collection   - collection as string or object
      * @param mixed $example      - the example document as a Document object or an array
      * @param mixed $newValue     - patch document or array which contains the attributes and values to be replaced
      * @param mixed $options      - optional, array of options (see below) or the boolean value for $policy (for compatibility prior to version 1.1 of this method)
@@ -1457,10 +1641,12 @@ class CollectionHandler extends Handler
      *                            <li>'limit'       - can be used set a limit on how many documents to replace at most. If limit is specified but is less than the number of documents in the collection, it is undefined which of the documents will be replaced.</li>
      *                            </p>
      *
+     * @deprecated use AQL queries instead
+     *
      * @return bool - always true, will throw if there is an error
      * @since 1.2
      */
-    public function replaceByExample($collectionId, $example, $newValue, array $options = [])
+    public function replaceByExample($collection, $example, $newValue, array $options = [])
     {
         $_documentClass = $this->_documentClass;
 
@@ -1473,7 +1659,7 @@ class CollectionHandler extends Handler
         }
 
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_EXAMPLE    => $example->getAllAsObject(['_ignoreHiddenAttributes' => true]),
             self::OPTION_NEW_VALUE  => $newValue->getAllAsObject(['_ignoreHiddenAttributes' => true])
         ];
@@ -1509,7 +1695,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId      - collection id as string or number
+     * @param mixed $collection        - collection as string or object
      * @param mixed $document          - the example document as a Document object or an array
      * @param array $options           - optional - an array of options.
      *                                 <p>Options are :<br>
@@ -1524,7 +1710,7 @@ class CollectionHandler extends Handler
      *
      * @since 1.2
      */
-    public function removeByExample($collectionId, $document, array $options = [])
+    public function removeByExample($collection, $document, array $options = [])
     {
         $_documentClass = $this->_documentClass;
 
@@ -1537,7 +1723,7 @@ class CollectionHandler extends Handler
         }
 
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_EXAMPLE    => $document->getAllAsObject(['_ignoreHiddenAttributes' => true])
         ];
 
@@ -1570,7 +1756,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId      - collection id as string or number
+     * @param mixed $collection        - collection as string or object
      * @param array $keys              - array of document keys
      * @param array $options           - optional - an array of options.
      *                                 <p>Options are :<br>
@@ -1584,10 +1770,10 @@ class CollectionHandler extends Handler
      *
      * @since 2.6
      */
-    public function removeByKeys($collectionId, array $keys, array $options = [])
+    public function removeByKeys($collection, array $keys, array $options = [])
     {
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_KEYS       => $keys
         ];
 
@@ -1623,7 +1809,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed $collectionId        - collection id as string or number
+     * @param mixed $collection          - collection as string or object
      * @param array $keys                - array of document keys
      * @param array $options             - optional array of options.
      *                                   <p>Options are :<br>
@@ -1636,12 +1822,12 @@ class CollectionHandler extends Handler
      *
      * @since 2.6
      */
-    public function lookupByKeys($collectionId, array $keys, array $options = [])
+    public function lookupByKeys($collection, array $keys, array $options = [])
     {
         $_documentClass = $this->_documentClass;
 
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_KEYS       => $keys
         ];
 
@@ -1666,7 +1852,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed  $collectionId    - collection id as string or number
+     * @param mixed  $collection      - collection as string or object
      * @param string $attribute       - the attribute path , like 'a', 'a.b', etc...
      * @param mixed  $left            - The lower bound.
      * @param mixed  $right           - The upper bound.
@@ -1687,9 +1873,11 @@ class CollectionHandler extends Handler
      *                                </li>
      *                                </p>
      *
+     * @deprecated use AQL queries instead
+     *
      * @return Cursor - documents matching the example [0...n]
      */
-    public function range($collectionId, $attribute, $left, $right, array $options = [])
+    public function range($collection, $attribute, $left, $right, array $options = [])
     {
         if ($attribute === '') {
             throw new ClientException('Invalid attribute specification');
@@ -1701,7 +1889,7 @@ class CollectionHandler extends Handler
         }
 
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_ATTRIBUTE  => $attribute,
             self::OPTION_LEFT       => $left,
             self::OPTION_RIGHT      => $right
@@ -1730,10 +1918,9 @@ class CollectionHandler extends Handler
      *
      * This will throw if the list cannot be fetched from the server
      *
-     *
      * @throws Exception
      *
-     * @param mixed  $collectionId    - collection id as string or number
+     * @param mixed  $collection      - collection as string or object
      * @param double $latitude        - The latitude of the coordinate.
      * @param double $longitude       - The longitude of the coordinate.
      * @param array  $options         - optional array of options.
@@ -1753,12 +1940,14 @@ class CollectionHandler extends Handler
      *                                </li>
      *                                </p>
      *
+     * @deprecated use AQL queries instead
+     *
      * @return Cursor - documents matching the example [0...n]
      */
-    public function near($collectionId, $latitude, $longitude, array $options = [])
+    public function near($collection, $latitude, $longitude, array $options = [])
     {
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_LATITUDE   => $latitude,
             self::OPTION_LONGITUDE  => $longitude
         ];
@@ -1789,7 +1978,7 @@ class CollectionHandler extends Handler
      *
      * @throws Exception
      *
-     * @param mixed  $collectionId    - collection id as string or number
+     * @param mixed  $collection      - collection as string or object
      * @param double $latitude        - The latitude of the coordinate.
      * @param double $longitude       - The longitude of the coordinate.
      * @param int    $radius          - The maximal radius (in meters).
@@ -1810,12 +1999,14 @@ class CollectionHandler extends Handler
      *                                </li>
      *                                </p>
      *
+     * @deprecated use AQL queries instead
+     *
      * @return Cursor - documents matching the example [0...n]
      */
-    public function within($collectionId, $latitude, $longitude, $radius, array $options = [])
+    public function within($collection, $latitude, $longitude, $radius, array $options = [])
     {
         $body = [
-            self::OPTION_COLLECTION => $collectionId,
+            self::OPTION_COLLECTION => $this->makeCollection($collection),
             self::OPTION_LATITUDE   => $latitude,
             self::OPTION_LONGITUDE  => $longitude,
             self::OPTION_RADIUS     => $radius
@@ -1842,18 +2033,8 @@ class CollectionHandler extends Handler
      * @param $collection
      * @param $options
      */
-    private function createCollectionIfOptions($collection, $options)
+    private function lazyCreateCollection($collection, $options)
     {
-        if (!array_key_exists(CollectionHandler::OPTION_CREATE_COLLECTION, $options)) {
-            return;
-        }
-
-        $value = (bool) $options[CollectionHandler::OPTION_CREATE_COLLECTION];
-
-        if (!$value) {
-            return;
-        }
-
         $collectionOptions = [];
         if (isset($options['createCollectionType'])) {
             if ($options['createCollectionType'] === 'edge' ||
