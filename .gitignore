@@ -1,6 +1,7 @@
 /composer.json
 /apigen.phar
 .idea/php.xml
+.idea/
 
 
 # Created by https://www.gitignore.io/api/jetbrains
