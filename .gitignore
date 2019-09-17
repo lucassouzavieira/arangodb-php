@@ -3,6 +3,9 @@
 .idea/php.xml
 .idea/
 
+# Composer
+composer.lock
+vendor/
 
 # Created by https://www.gitignore.io/api/jetbrains
 
